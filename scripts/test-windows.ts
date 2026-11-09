@@ -24,6 +24,7 @@ const unix = new Set([
   "try",
   "uninstall",
   "up-lock",
+  "windows-service-update",
   "worker",
   "worker-login-shell",
   "worker-lookup",
