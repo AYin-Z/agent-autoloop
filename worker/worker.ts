@@ -356,6 +356,26 @@ export function createWorker({
   function discardReceipt(entry: Entry, adapter: Adapter, problem: string) {
     const original = { ...entry, turn: entry.turn - entry.repairs };
     const reading = read(original, adapter, 0);
+    if (entry.job.rule.receipt === "required") {
+      // The business may already have had effects. Keep a resumable question, never an automatic retry.
+      return endWith(entry, {
+        outcome: "done",
+        summary: "结果待核实：本轮已结束，尚不能确认业务完成",
+        ...(reading.session ? { session: reading.session } : adapter.link ? { session: entry.session } : {}),
+        ...(entry.usage && { usage: entry.usage }),
+        ask: [
+          {
+            key: `autoloop-receipt-check-${entry.run}`,
+            title: "这一轮的结果需要核实",
+            text: "执行结果没有得到有效确认。继续前需要先核对已有结果，避免重复操作。",
+            options: ["核对结果后继续", "停止跟进"],
+            about:
+              `本轮结果未确认（${problem.slice(0, 500)}）。原始输出在 ${files(original).out}，保留 ${KEEP_DAYS} 天。` +
+              "先核对实际状态和原始记录，不重做已完成业务；无法确定时继续保留未决状态。本人选择停止跟进则不执行剩余业务。",
+          },
+        ],
+      });
+    }
     const { result } = resultFrom(readMessage(reading.text ?? ""), {
       session: reading.session ?? (adapter.link ? entry.session : undefined),
       usage: entry.usage,
@@ -380,12 +400,12 @@ export function createWorker({
     if (entry.why === "timeout") {
       const minutes = entry.job.agent.timeout ?? TIMEOUT_MINUTES;
       const error = `超过 ${minutes} 分钟还没结束，已停止`;
-      if (entry.repairs) return discardReceipt(entry, adapter, error);
+      if (entry.repairs || entry.job.rule.receipt === "required") return discardReceipt(entry, adapter, error);
       return endWith(entry, { outcome: "failed", error, ...known, ...usage });
     }
     if (seen.error !== undefined || !seen.text?.trim()) {
       const error = seen.error || "没留下结果";
-      if (entry.repairs) return discardReceipt(entry, adapter, error);
+      if (entry.repairs || entry.job.rule.receipt === "required") return discardReceipt(entry, adapter, error);
       // The conversation may not be there to go on in, or something else has it open: this go carries on in a new one.
       // Not once the turn has started: a new one would do its work again. The hub tries again later, in this one.
       if (entry.resume && !entry.triedFresh && entry.repairs === 0 && !seen.started) {
@@ -402,7 +422,8 @@ export function createWorker({
       }
       return endWith(entry, { outcome: "failed", error: error.slice(0, 500), ...known, ...usage });
     }
-    const { result, problem } = resultFrom(readMessage(seen.text), { session, usage: entry.usage });
+    const required = entry.job.rule.receipt === "required";
+    const { result, problem } = resultFrom(readMessage(seen.text, required), { session, usage: entry.usage });
     if (entry.repairs && !problem && result.outcome === "failed") return discardReceipt(entry, adapter, result.error!);
     if (!problem) return endWith(entry, result);
     // Its work is done and only the receipt is wrong: it writes the receipt again, and does nothing again.
@@ -411,7 +432,7 @@ export function createWorker({
       entry.repairs += 1;
       entry.resume = seen.session;
       try {
-        launch(entry, adapter, repairPrompt(problem));
+        launch(entry, adapter, repairPrompt(problem, required));
         return;
       } catch (error) {
         return discardReceipt(entry, adapter, String(error));

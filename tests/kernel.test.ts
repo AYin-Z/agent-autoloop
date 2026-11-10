@@ -21,10 +21,53 @@ import { decide } from "../kernel/decide.ts";
 import { InputError } from "../kernel/errors.ts";
 import { parseRules } from "../protocol/rules.ts";
 import { at } from "./helpers.ts";
+import { readMessage, resultFrom } from "../worker/contract.ts";
 
 const environment = { secret: "simulation-secret", publicUrl: "https://hub.test" };
 const rules = parseRules(readFileSync(new URL("./rules.fixture.json", import.meta.url), "utf8"), 0, "UTC");
 const seeded = () => evolve(empty(), decide(empty(), { type: "rules", args: [rules] }, 1, environment).facts);
+
+// Receipt policy must survive claiming/replay, and a waiting result must resume only when answered.
+test("required receipt jobs retain their policy and waiting questions resume the same item once", () => {
+  let view = seeded();
+  const act = (type: string, ...args: unknown[]) => {
+    const d = decide(view, { type, args }, 1000, environment);
+    view = evolve(view, d.facts);
+    return d.value;
+  };
+  try {
+    const strict = structuredClone(rules);
+    strict.rules[0].receipt = "required";
+    act("rules", strict);
+    act("ingest", "app", { id: "required", type: "feedback.new", subject: "#receipt" });
+    let job = act("claimNext", "w1", "strict");
+    assert.equal(job.rule.receipt, "required");
+    act("rules", rules);
+    job = act("claimNext", "w1", "strict");
+    assert.equal(job.rule.receipt, "required", "claimed policy is pinned");
+    const ask = [
+      { key: "access", title: "恢复连接", text: "只验收", options: ["已恢复", "停止"], about: "不重做更新" },
+    ];
+    const { result, problem } = resultFrom(
+      readMessage(`等待恢复\n\`\`\`agent-autoloop\n${JSON.stringify({ outcome: "waiting", ask })}\n\`\`\``, true),
+      { session: "original-session" },
+    );
+    assert.equal(problem, undefined);
+    act("finish", job.run, job.token, result);
+    act("finish", job.run, job.token, result);
+    assert.equal(rows(view, "cards", { kind: "ask" }).length, 1);
+    assert.equal(act("claimNext", "w1", "before-answer"), null);
+    const card = rows(view, "cards", { kind: "ask" })[0];
+    act("answer", card.id, { choice: 0 });
+    act("answer", card.id, { choice: 0 });
+    const next = act("claimNext", "w1", "after-answer");
+    assert.equal(next.session, "original-session");
+    assert.equal(next.context.answers[0].about, "不重做更新");
+    assert.equal(rows(view, "runs").length, 2);
+  } finally {
+    view.close();
+  }
+});
 test("decisions are deterministic and leave their input untouched", () => {
   const view = seeded();
   const before = snapshot(view);

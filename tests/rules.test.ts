@@ -49,6 +49,16 @@ test("the fixture loads, with defaults filled in", () => {
   assert.equal(parseRules(JSON.stringify(wrapped)).agents.a1.program, "/opt/bin/claude-via-gateway");
 });
 
+test("required receipts are opt-in and misspelt modes are refused", () => {
+  const r = good();
+  assert.equal(parseRules(JSON.stringify(r)).rules[0].receipt, undefined);
+  r.rules[0].receipt = "required";
+  assert.equal(parseRules(JSON.stringify(r)).rules[0].receipt, "required");
+  problem((r) => {
+    r.rules[0].receipt = "strict";
+  }, /receipt/);
+});
+
 test("a mistake says which rule and what is wrong", () => {
   problem((r) => {
     r.rules[0].to = "nobody";

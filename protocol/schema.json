@@ -443,6 +443,9 @@
             "prompt": {
               "type": "string"
             },
+            "receipt": {
+              "const": "required"
+            },
             "emits": {
               "type": "object",
               "properties": {

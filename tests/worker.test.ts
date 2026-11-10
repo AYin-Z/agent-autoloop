@@ -539,52 +539,117 @@ test("a plugin with sessions and nothing to open gets to rewrite its receipt too
   assert.deepEqual(hub.results[0].notice, [{ title: "看一眼", text: "这个" }]);
 });
 
-for (const failure of ["exit", "timeout", "unreadable", "empty", "failed-message"] as const) {
-  test(`a ${failure} receipt repair keeps the original completed business result`, async () => {
-    const hub = fakeHub();
-    let clock = Date.now();
-    const wrong = said(
-      `repair-${failure}`,
-      `session=original\n业务已经完成\n${FENCE}agent-autoloop\n{ bad\n${FENCE}\n`,
-    );
-    const marker = join(folder, `business-${failure}`);
-    const repair =
-      failure === "exit"
-        ? "echo repair-failed >&2; exit 1"
-        : failure === "timeout"
-          ? "sleep 30"
-          : failure === "empty"
-            ? "true"
-            : failure === "failed-message"
-              ? "echo 没跑成：补回执失败"
-              : `printf 'session=original\\n没跑成：补回执失败\\n${FENCE}agent-autoloop\\n{ bad\\n${FENCE}\\n'`;
-    hub.jobs.push(
-      job({
+for (const required of [false, true])
+  for (const failure of ["exit", "timeout", "unreadable", "empty", "failed-message"] as const) {
+    test(`a ${failure} receipt repair ${required ? "keeps a required receipt pending" : "keeps the original completed business result"}`, async () => {
+      const hub = fakeHub();
+      let clock = Date.now();
+      const wrong = said(
+        `repair-${required}-${failure}`,
+        `session=original\n业务已经完成\n${FENCE}agent-autoloop\n{ bad\n${FENCE}\n`,
+      );
+      const marker = join(folder, `business-${required}-${failure}`);
+      const repair =
+        failure === "exit"
+          ? "echo repair-failed >&2; exit 1"
+          : failure === "timeout"
+            ? "sleep 30"
+            : failure === "empty"
+              ? "true"
+              : failure === "failed-message"
+                ? "echo 没跑成：补回执失败"
+                : `printf 'session=original\\n没跑成：补回执失败\\n${FENCE}agent-autoloop\\n{ bad\\n${FENCE}\\n'`;
+      const given = job({
         use: "scripted",
         timeout: 1,
         command: [`if [ -n "$1" ]; then ${repair}; else echo once >> "${marker}"; cat "${wrong}"; fi`],
-      }),
-    );
-    const w = worker(hub, { now: () => clock });
-    await until(w, () => w.entries().some((e) => e.repairs > 0));
-    if (failure === "timeout") clock += 61_000;
-    await until(
-      w,
-      () => hub.results.length === 1,
-      () => {
-        if (failure === "timeout") clock += 1000;
-      },
-    );
-    assert.equal(readFileSync(marker, "utf8"), "once\n");
-    assert.equal(hub.results[0].outcome, "done");
-    assert.equal(hub.results[0].summary, "业务已经完成");
-    assert.match(hub.results[0].notice[0].text, /stdout-1\.log/);
-    assert.equal(
-      hub.results[0].usage.input,
-      failure === "unreadable" ? 3 : ["empty", "failed-message"].includes(failure) ? 2 : 1,
-    );
+      });
+      if (required) Object.assign(given.rule, { receipt: "required" });
+      hub.jobs.push(given);
+      const w = worker(hub, { now: () => clock });
+      await until(w, () => w.entries().some((e) => e.repairs > 0));
+      if (failure === "timeout") clock += 61_000;
+      await until(
+        w,
+        () => hub.results.length === 1,
+        () => {
+          if (failure === "timeout") clock += 1000;
+        },
+      );
+      assert.equal(readFileSync(marker, "utf8"), "once\n");
+      assert.equal(hub.results[0].outcome, "done");
+      if (required) {
+        assert.match(hub.results[0].summary, /待核实/);
+        assert.match(hub.results[0].ask[0].about, /stdout-1\.log/);
+      } else {
+        assert.equal(hub.results[0].summary, "业务已经完成");
+        assert.match(hub.results[0].notice[0].text, /stdout-1\.log/);
+      }
+      assert.equal(
+        hub.results[0].usage.input,
+        failure === "unreadable" ? 3 : ["empty", "failed-message"].includes(failure) ? 2 : 1,
+      );
+    });
+  }
+
+// A missing strict receipt must keep a question open instead of retrying side effects or claiming success.
+test("required receipts preserve uncertain results across worker restart without rerunning business", async () => {
+  const hub = fakeHub();
+  hub.failResults = 100;
+  const marker = join(folder, "required-business");
+  const given = job({ command: ["/bin/sh", "-c", `echo once >> "${marker}"; echo 任务尚未完成，等待权限。`] });
+  Object.assign(given.rule, { receipt: "required" });
+  hub.jobs.push(given);
+  const first = worker(hub);
+  await until(first, () => first.entries().some((e) => e.result !== undefined));
+  hub.failResults = 0;
+  const resumed = worker(hub);
+  await until(resumed, () => hub.results.length === 1);
+  const result = hub.results[0];
+  assert.equal(result.outcome, "done", "only the round ends, with a pending question and no automatic retry");
+  assert.match(result.summary, /待核实/);
+  assert.equal(result.ask.length, 1);
+  assert.equal(result.session, undefined, "commands must not get a made-up resumable session");
+  assert.match(result.ask[0].about, /不重做/);
+  assert.equal(readFileSync(marker, "utf8"), "once\n");
+});
+
+test("required receipt repair can report waiting, without repeating the business turn", async () => {
+  const hub = fakeHub();
+  const marker = join(folder, "required-repair-business");
+  const wrong = said("required-wrong", "session=strict\n我无法访问该系统，因此尚未执行。\n");
+  const right = said(
+    "required-right",
+    `session=strict\n待你恢复连接\n${FENCE}agent-autoloop\n${JSON.stringify({ outcome: "waiting", ask: [{ key: "access", title: "恢复连接", text: "验收尚未完成", options: ["已恢复", "暂不继续"], about: "只验收，不重复更新" }] })}\n${FENCE}\n`,
+  );
+  const given = job({
+    use: "scripted",
+    command: [`if [ -n "$1" ]; then cat "${right}"; else echo once >> "${marker}"; cat "${wrong}"; fi`],
   });
-}
+  Object.assign(given.rule, { receipt: "required" });
+  hub.jobs.push(given);
+  const w = worker(hub);
+  await until(w, () => hub.results.length === 1);
+  assert.equal(readFileSync(marker, "utf8"), "once\n");
+  assert.equal(hub.results[0].ask[0].key, "access");
+  assert.equal(hub.results[0].usage.input, 2);
+});
+
+test("required receipts do not retry a process that exits or goes silent after a side effect", async () => {
+  for (const ending of ["exit 1", "exit 0"]) {
+    const hub = fakeHub();
+    const marker = join(folder, `required-exit-${ending.at(-1)}`);
+    const given = job({ command: ["/bin/sh", "-c", `echo once >> "${marker}"; ${ending}`] });
+    Object.assign(given.rule, { receipt: "required" });
+    hub.jobs.push(given);
+    const w = worker(hub);
+    await until(w, () => hub.results.length === 1);
+    assert.equal(hub.results[0].outcome, "done");
+    assert.match(hub.results[0].summary, /待核实/);
+    assert.equal(hub.results[0].ask.length, 1);
+    assert.equal(readFileSync(marker, "utf8"), "once\n");
+  }
+});
 
 test("a receipt that stays unreadable is given up on: the run ends on its first line, and the owner hears", async () => {
   const hub = fakeHub();

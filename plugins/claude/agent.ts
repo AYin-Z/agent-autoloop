@@ -86,6 +86,7 @@ export default {
     // one that carried its receipt. What it asked of the hub is still what it wants, so the words stay the last turn's and
     // the receipt is carried along: dropped, the card it asked for never exists and the work looks untouched.
     // One it wrote wrongly is its own and is written again; only a turn with no receipt at all keeps the earlier one.
+    // Only actions carry over. An explicit outcome belongs to that earlier turn, not this final callback.
     const own = readMessage(said);
     const carried =
       own.receipt === undefined && own.problem === undefined

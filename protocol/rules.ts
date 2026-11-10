@@ -80,6 +80,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["group", isText, NOT_EMPTY, true],
     ["parallel", isCount, "要是正整数", true],
     ["resume", (value) => typeof value === "boolean", "只能是 true 或 false", true],
+    ["receipt", (value) => value === "required", "只能是 required；省略时沿用第一行结论", true],
     ["tell", (value) => TELLS.includes(value as string), `只能是 ${TELLS.join("、")}`, true],
     ["emits", isObject, "要是一个对象", true],
     ["channels", isSomeWords, "要是通道编号的列表", true],

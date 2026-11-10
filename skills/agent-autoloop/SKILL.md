@@ -236,3 +236,6 @@ Windows 用任务计划程序在本人登录后启动；通过 SSH 管理时仍�
 ## 版本与卸载
 
 `agent-autoloop --version` 显示版本和提交。`agent-autoloop uninstall` 确认后删除自身程序、链接和服务，规则、密钥和记录保留；`--yes` 只跳过确认。
+
+
+需要明确完成状态的规则设 `"receipt": "required"`（先同时更新中台和接单程序）。最后一条消息必须附 `agent-autoloop` JSON 代码块和 `outcome`：`done`、`nothing`、`failed` 或 `waiting`。等待人/验收时用 `waiting` 并交 `ask` 或非取消的 `later`，固定 key 保持不变；`failed` 仅用于可安全重试的临时失败，只能带 notice。缺失/损坏回执补写失败会留下结果待核实问题，不自动重做业务；收到核对决定时先查实际状态。严格回执不代替结果验收，未启用的规则仍沿用原约定。

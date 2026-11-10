@@ -10,6 +10,60 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { promptFor, readMessage, repairPrompt, resultFrom } from "../worker/contract.ts";
 
+// Required receipts must not silently settle an ambiguous business result or lose its follow-up.
+test("required receipts reject ambiguous text and require an explicit outcome", () => {
+  for (const text of [
+    "我无法访问该系统，因此尚未执行。",
+    "任务尚未完成，等待权限。",
+    "",
+    "好了\n```agent-autoloop\n{}\n```",
+  ]) {
+    assert.ok(readMessage(text, true).problem);
+  }
+  const text = "我无法访问该系统，因此尚未执行。";
+  assert.equal(readMessage(text).problem, undefined, "legacy text commands keep their contract");
+  assert.equal(readMessage(text).outcome, "done");
+});
+
+test("required receipt outcomes are explicit and waiting has a resumable follow-up", () => {
+  const message = (outcome: unknown, receipt = {}) =>
+    readMessage(`结论\n\`\`\`agent-autoloop\n${JSON.stringify({ outcome, ...receipt })}\n\`\`\``, true);
+  for (const outcome of ["done", "nothing", "failed"] as const) {
+    assert.equal(resultFrom(message(outcome), {}).result.outcome, outcome);
+    assert.equal(resultFrom(message(outcome), {}).problem, undefined);
+  }
+  assert.ok(message("success").problem);
+  assert.ok(message("cancelled").problem, "only the worker can confirm a process stopped");
+  assert.ok(resultFrom(message("waiting"), {}).problem);
+  assert.ok(resultFrom(message("waiting", { later: [{ key: "old", cancel: true }] }), {}).problem);
+  assert.ok(
+    resultFrom(message("waiting", { notice: [{ title: "t", text: "t" }] }), {}).problem,
+    "a notice does not resume the item",
+  );
+  const ask = [
+    {
+      key: "access",
+      title: "恢复连接",
+      text: "恢复后只验收",
+      options: ["已恢复", "暂不继续"],
+      about: "只核实，不重做",
+    },
+  ];
+  const waiting = resultFrom(message("waiting", { ask }), {});
+  assert.equal(waiting.problem, undefined);
+  assert.equal(waiting.result.outcome, "done", "the wire outcome ends the round; the question keeps the item open");
+  assert.deepEqual(waiting.result.ask, ask);
+  assert.equal(
+    resultFrom(message("waiting", { later: [{ key: "check", at: "2026-12-01T00:00:00Z", about: "核对结果" }] }), {})
+      .problem,
+    undefined,
+  );
+  assert.ok(
+    resultFrom(message("failed", { ask }), {}).problem,
+    "a retryable failure must not silently drop a question",
+  );
+});
+
 const job = (over: object = {}) => ({
   run: 7,
   token: "t",
@@ -67,6 +121,14 @@ test("the prompt says what to do and how to end, but not what anyone wrote", () 
   assert.ok(!text.includes("王某"));
   assert.ok(!text.includes("管理员权限"));
   assert.ok(!text.includes('"events"'), "a rule that can't emit isn't offered it");
+});
+
+test("required prompts and repairs explain the explicit outcome and follow-up contract", () => {
+  const text = promptFor(job({ rule: { name: "意见", cwd: "~/x", receipt: "required" } }) as any, "/tmp/ctx.json");
+  assert.match(text, /必须写 outcome/);
+  assert.match(text, /waiting 必须同时交 ask/);
+  assert.doesNotMatch(text, /什么都不需要就不附/);
+  assert.match(repairPrompt("缺少回执", true), /不要为补格式把未完成改成完成/);
 });
 
 test("the prompt mentions what this run is carrying on, and what it may emit", () => {

@@ -261,6 +261,21 @@ test("Claude Code: a receipt it wrote isn't lost when a background task calls it
   }
 });
 
+// An earlier strict outcome cannot be attached to a later result: stale failed would repeat completed work.
+test("Claude Code: background callbacks cannot inherit a previous explicit outcome", () => {
+  for (const outcome of ["failed", "done"]) {
+    const early = said(
+      `早期结论\n\`\`\`agent-autoloop\n${JSON.stringify({ outcome, notice: [{ title: "记录", text: "早期记录" }] })}\n\`\`\``,
+    );
+    for (const last of ["部署已完成，健康检查通过", '部署已完成\n```json\n{"outcome":"done"}\n```']) {
+      const read = claude.read(stream(init, early, init, said(last)), 0, "");
+      const handed = resultFrom(readMessage(read.text!, true), {});
+      assert.ok(handed.problem, "the final turn must supply its own explicit receipt or be repaired");
+      assert.notEqual(handed.result.outcome, "failed", "stale failure must not schedule a retry");
+    }
+  }
+});
+
 test("Codex: access, new and going on", { skip: !stubbed(codex, {}) }, () => {
   const argv = stubbed(codex, {})!;
   assert.deepEqual(argv.slice(1, 4), ["exec", "--json", "--skip-git-repo-check"]);

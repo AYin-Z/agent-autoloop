@@ -16,9 +16,20 @@ const JSON_BLOCK = /(?<=^|\n)[ \t]*```json[ \t]*\r?\n((?:[^\n]*\n)*?)[ \t]*```[ 
 const OPENED = /(?<=^|\n)[ \t]*```agent-autoloop[ \t]*\r?\n/;
 const unique = <T>(items: T[]) => [...new Set(items)];
 
-/** The last receipt block in what an Agent said, as it wrote it, for a run keeping one its last turn left out. */
+/** Carry earlier actions across a callback, never an earlier turn's explicit outcome. */
 export function receiptBlock(said: string): string | undefined {
-  return [...said.matchAll(BLOCK)].at(-1)?.[0];
+  const block = [...said.matchAll(BLOCK)].at(-1);
+  if (!block) return undefined;
+  try {
+    const receipt = JSON.parse(block[1]);
+    if (receipt && typeof receipt === "object" && Object.hasOwn(receipt, "outcome")) {
+      const { outcome: _outcome, ...actions } = receipt;
+      return `\`\`\`agent-autoloop\n${JSON.stringify(actions)}\n\`\`\``;
+    }
+  } catch {
+    // Keep a broken block broken, so the worker asks for a repair rather than silently dropping it.
+  }
+  return block[0];
 }
 
 function describeEvent({ sourceName, type, subject, link }: Job["context"]["events"][number]) {
@@ -27,6 +38,7 @@ function describeEvent({ sourceName, type, subject, link }: Job["context"]["even
 
 export function promptFor(job: Job, contextFile: string) {
   const { rule, context, askFirst, session } = job;
+  const required = rule.receipt === "required";
   // A session carried on has the skill it read before in its history, and goes by that copy unless told it may be stale.
   const skill = !rule.skill
     ? ""
@@ -58,7 +70,9 @@ export function promptFor(job: Job, contextFile: string) {
     "- 不要停下来等回答。要问人就把问题写进回执、结束这一轮；回答来了会再派给你，接着这个会话。",
     "- 只有本人才能恢复的连接、登录或身份验证等阻塞：保留已完成的业务和未验收项，第一行写“待你处理：”加具体原因，" +
       "用 ask 说明需要本人做什么、恢复后怎么继续；about 写清只接着做剩余步骤，不重做已完成的业务。不把未验收说成已通过。",
-    "- 同一阻塞已有 open 卡片时不重复提问；不用 later 定时重试，waiting 里同一阻塞已有的复查用 later 的 cancel 取消。",
+    required
+      ? "- 同一阻塞的 ask 或 later 使用同一固定 key，中台会去重；不要换 key 重复提问。需要本人恢复的阻塞不用 later 定时重试，已有的同类复查用 cancel 取消。"
+      : "- 同一阻塞已有 open 卡片时不重复提问；不用 later 定时重试，waiting 里同一阻塞已有的复查用 later 的 cancel 取消。",
     "- 等自己的改动检查、合并或发布不算没跑成；等不到结果就用 later 约好下次核实。",
     "",
     "最后一条消息的第一行写结论（一般只进记录；规则要求每轮都通知时会发给人）：",
@@ -66,10 +80,15 @@ export function promptFor(job: Job, contextFile: string) {
     "- 看过了，没有要做的：写“没事可做：”加一句原因。",
     "- 其余：一句话说做成了什么。",
     "",
-    "需要中台做事时，在最后一条消息的末尾附一个回执：" +
-      "一个标记为 agent-autoloop 的代码块，里面是 JSON，用不到的字段不写；什么都不需要就不附。",
+    required
+      ? "本规则要求严格回执：最后一条消息必须附 agent-autoloop JSON 代码块，必须写 outcome。" +
+        "done 表示本轮工作完成，nothing 表示无需处理，failed 仅用于可以安全重试的临时失败，waiting 表示还在等人或等后续核实。" +
+        "waiting 必须同时交 ask 或非 cancel 的 later；只有 notice 不会唤醒后续。failed 只能带 notice，不能带其他动作。" +
+        "第一行仍写清现状，不能把尚未验收写成已通过；明确 outcome 不等于独立验收。"
+      : "需要中台做事时，在最后一条消息的末尾附一个回执：" +
+        "一个标记为 agent-autoloop 的代码块，里面是 JSON，用不到的字段不写；什么都不需要就不附。",
     "```agent-autoloop",
-    `{"ask":[{"title":"一句话说要决定什么","text":"三行以内","options":["选项一","选项二"],"recommend":0,\
+    `{${required ? '"outcome":"waiting",' : ""}"ask":[{"title":"一句话说要决定什么","text":"三行以内","options":["选项一","选项二"],"recommend":0,\
 "about":"留给接着干的自己：背景，每个选项具体怎么做","key":"这件事的固定名字"}],
  "notice":[{"title":"一句话","text":"非他亲自做不可的事：要他做什么"}],
  "resolve":[{"card":12,"reason":"在哪核实了已解决或本人已决定"}],
@@ -84,9 +103,12 @@ export function promptFor(job: Job, contextFile: string) {
   ].join("\n");
 }
 
-export const repairPrompt = (problem: string) =>
+export const repairPrompt = (problem: string, required = false) =>
   `你上一条消息的回执读不懂（${problem}）。你做过的事不要重做，也不要调用任何工具，` +
-  "只把最后一条消息按格式重写一遍：第一行是结论，末尾一个标记为 agent-autoloop 的代码块，里面是合法的 JSON。";
+  "只把最后一条消息按格式重写一遍：第一行是结论，末尾一个标记为 agent-autoloop 的代码块，里面是合法的 JSON。" +
+  (required
+    ? "必须写 outcome：done、nothing、failed 或 waiting；waiting 必须有 ask 或非 cancel 的 later，failed 只能带 notice。不要为补格式把未完成改成完成。"
+    : "");
 
 type Message = {
   outcome: "done" | "nothing" | "failed";
@@ -94,6 +116,8 @@ type Message = {
   error?: string;
   receipt?: Record<string, unknown>;
   problem?: string;
+  explicit?: boolean;
+  waiting?: boolean;
 };
 
 /** Keep summaries within the legacy UTF-16 limit without splitting a character. */
@@ -104,7 +128,8 @@ function fit(text: string, limit: number) {
 }
 
 /** How the run ended is on the first line; what it wants of the hub in its last receipt. */
-export function readMessage(said: string): Message {
+export function readMessage(said: string, required = false): Message {
+  const fields = required ? [...RECEIPT_FIELDS, "outcome"] : RECEIPT_FIELDS;
   const blocks = [...said.matchAll(BLOCK)];
   const lines = said.replace(BLOCK, "").split("\n");
   const firstLine = lines.map((line) => line.trim()).find(Boolean) ?? "";
@@ -112,7 +137,7 @@ export function readMessage(said: string): Message {
     .replace(/^[#>*\s]+/, "")
     .replace(/\*\*/g, "")
     .trim();
-  if (!said.trim()) return { outcome: "failed", error: "没留下结果" };
+  if (!said.trim()) return { outcome: "failed", error: "没留下结果", ...(required && { problem: "缺少严格回执" }) };
   const rest = (word: string) => first.slice(word.length).replace(/^[\s:：]+/, "");
   const failed = FAILED.find((word) => first.startsWith(word));
   const nothing = NOTHING.find((word) => first.startsWith(word));
@@ -134,14 +159,14 @@ export function readMessage(said: string): Message {
           typeof value === "object" &&
           !Array.isArray(value) &&
           keys.length > 0 &&
-          keys.every((key) => RECEIPT_FIELDS.includes(key))
+          keys.every((key) => fields.includes(key))
         )
           return { ...message, problem: "疑似回执的 JSON 代码块必须标记为 agent-autoloop" };
       } catch {
         // Unrelated JSON remains ordinary output.
       }
     }
-    return message;
+    return required ? { ...message, problem: "缺少含 outcome 的 agent-autoloop 严格回执" } : message;
   }
   let receipt: unknown;
   try {
@@ -152,8 +177,21 @@ export function readMessage(said: string): Message {
   if (typeof receipt !== "object" || receipt === null || Array.isArray(receipt)) {
     return { ...message, problem: "回执要是一个 JSON 对象" };
   }
-  const unknown = Object.keys(receipt).find((name) => !RECEIPT_FIELDS.includes(name));
-  if (unknown) return { ...message, problem: `回执里有不认识的字段 ${unknown}，只能是 ${RECEIPT_FIELDS.join("、")}` };
+  const unknown = Object.keys(receipt).find((name) => !fields.includes(name));
+  if (unknown) return { ...message, problem: `回执里有不认识的字段 ${unknown}，只能是 ${fields.join("、")}` };
+  if (required) {
+    const { outcome, ...actions } = receipt as Record<string, unknown>;
+    if (!["done", "nothing", "failed", "waiting"].includes(outcome as string))
+      return { ...message, problem: "严格回执的 outcome 必须是 done、nothing、failed 或 waiting" };
+    if (!first) return { ...message, problem: "严格回执还需要第一行说明实际结果" };
+    return {
+      outcome: outcome === "waiting" ? "done" : (outcome as Message["outcome"]),
+      ...(outcome === "failed" ? { error: first } : { summary: first }),
+      explicit: true,
+      ...(outcome === "waiting" && { waiting: true }),
+      receipt: actions,
+    };
+  }
   return { ...message, receipt: receipt as Record<string, unknown> };
 }
 
@@ -171,7 +209,16 @@ export function resultFrom(
   };
   if (message.problem) return { result: base, problem: message.problem };
   try {
-    return { result: parseResult({ ...base, ...message.receipt }) };
+    const result = parseResult({ ...base, ...message.receipt });
+    if (message.waiting && !result.ask?.length && !result.later?.some((timer) => !timer.cancel))
+      return { result: base, problem: "waiting 必须交 ask 或非 cancel 的 later，不能只留下通知" };
+    if (
+      message.explicit &&
+      result.outcome === "failed" &&
+      [result.ask, result.resolve, result.later, result.events].some((items) => items?.length)
+    )
+      return { result: base, problem: "failed 会重试且只处理 notice；等待人或后续核实请用 waiting" };
+    return { result };
   } catch (error) {
     if (error instanceof InputError) return { result: base, problem: error.message };
     throw error;
