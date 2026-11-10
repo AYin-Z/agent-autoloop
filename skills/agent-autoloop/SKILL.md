@@ -54,6 +54,8 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
 
 ## 接一个 Agent
 
+内置 `dsh` 的 `model`、`effort` 必须省略：headless 没有对应命令行参数，填写时会在启动前报错。模型和推理深度请在 DSH profile 中配置；`program` 包装脚本也不接收这两个字段。
+
 任何能打印最后一条消息的命令，在 `rules.json` 的 `agents` 写一行：
 
 ```json

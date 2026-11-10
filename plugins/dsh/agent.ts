@@ -29,17 +29,22 @@ function stepUsage(reported: any): Usage | undefined {
 }
 
 export default {
-  command: (turn) => [
-    turn.program ?? findProgram("dsh"),
-    "headless",
-    "--json",
-    "--permission-mode",
-    PRESET[turn.access],
-    "--approval-policy",
-    "never",
-    ...(turn.resume ? ["--session-id", turn.resume] : []),
-    turn.prompt,
-  ],
+  command: (turn) => {
+    // Headless has no model/effort flags; these belong to the selected DSH profile.
+    if (turn.model !== undefined || turn.effort !== undefined)
+      throw new Error("DSH 不支持 Agent 的 model / effort 字段；请移除它们，在 DSH profile 中配置模型和推理深度");
+    return [
+      turn.program ?? findProgram("dsh"),
+      "headless",
+      "--json",
+      "--permission-mode",
+      PRESET[turn.access],
+      "--approval-policy",
+      "never",
+      ...(turn.resume ? ["--session-id", turn.resume] : []),
+      turn.prompt,
+    ];
+  },
   read(stdout, code, stderr) {
     let session: string | undefined;
     let final: { text?: unknown; reason?: { kind?: string; error?: { message?: string } } | null } | undefined;

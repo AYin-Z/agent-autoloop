@@ -3,7 +3,8 @@
 // new session; a run that's still going, or whose turn has ended while its background work finishes, is taken for an answer
 // or a failure, and stopped; a run that ended in an error or without an answer is taken for a result; the token counts of a
 // run's several steps are dropped; a program that's missing, broken or too old to take these options passes for usable, or
-// a mistake it can only report on stdout is lost. The events are the shapes in DSH's own
+// a mistake it can only report on stdout is lost; configured model/effort silently fall back to the DSH profile.
+// The events are the shapes in DSH's own
 // packages/bundle/headless/src/json-stream.ts and startup.ts; its real program has not been run here. The program is looked up through the login shell, so this points the shell and HOME at
 // this test's own instead of whatever this machine has installed.
 import assert from "node:assert/strict";
@@ -54,6 +55,18 @@ const turn = {
   contextFile: "/ctx.json",
   folder: "/run",
 };
+
+test("DSH: unsupported model and effort settings are rejected before launching, including with a wrapper", () => {
+  for (const options of [{ model: "chosen-model" }, { effort: "high" }, { model: "chosen-model", effort: "high" }]) {
+    for (const resume of [null, "session-1"]) {
+      assert.throws(
+        () => dsh.command({ ...turn, ...options, resume, program: "/configured/dsh-wrapper" }),
+        /DSH.*model.*effort.*profile/,
+      );
+    }
+  }
+  assert.equal(dsh.command({ ...turn, program: "/configured/dsh-wrapper" })[0], "/configured/dsh-wrapper");
+});
 
 test("DSH: access is the permission preset every time, nothing waits for approval, and a resumed turn goes on in its session", () => {
   const policy = ["--approval-policy", "never"];
